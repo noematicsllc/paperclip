@@ -368,31 +368,35 @@ export function agentService(db: Db) {
     const shouldRecordRevision = Boolean(options?.recordRevision) && hasConfigPatchFields(normalizedPatch);
     const beforeConfig = shouldRecordRevision ? buildConfigSnapshot(existing) : null;
 
-    const updated = await db
-      .update(agents)
-      .set({ ...normalizedPatch, updatedAt: new Date() })
-      .where(eq(agents.id, id))
-      .returning()
-      .then((rows) => rows[0] ?? null);
-    const normalizedUpdated = updated ? normalizeAgentRow(updated) : null;
+    const normalizedUpdated = await db.transaction(async (tx) => {
+      const updated = await tx
+        .update(agents)
+        .set({ ...normalizedPatch, updatedAt: new Date() })
+        .where(eq(agents.id, id))
+        .returning()
+        .then((rows) => rows[0] ?? null);
+      const normalized = updated ? normalizeAgentRow(updated) : null;
 
-    if (normalizedUpdated && shouldRecordRevision && beforeConfig) {
-      const afterConfig = buildConfigSnapshot(normalizedUpdated);
-      const changedKeys = diffConfigSnapshot(beforeConfig, afterConfig);
-      if (changedKeys.length > 0) {
-        await db.insert(agentConfigRevisions).values({
-          companyId: normalizedUpdated.companyId,
-          agentId: normalizedUpdated.id,
-          createdByAgentId: options?.recordRevision?.createdByAgentId ?? null,
-          createdByUserId: options?.recordRevision?.createdByUserId ?? null,
-          source: options?.recordRevision?.source ?? "patch",
-          rolledBackFromRevisionId: options?.recordRevision?.rolledBackFromRevisionId ?? null,
-          changedKeys,
-          beforeConfig: beforeConfig as unknown as Record<string, unknown>,
-          afterConfig: afterConfig as unknown as Record<string, unknown>,
-        });
+      if (normalized && shouldRecordRevision && beforeConfig) {
+        const afterConfig = buildConfigSnapshot(normalized);
+        const changedKeys = diffConfigSnapshot(beforeConfig, afterConfig);
+        if (changedKeys.length > 0) {
+          await tx.insert(agentConfigRevisions).values({
+            companyId: normalized.companyId,
+            agentId: normalized.id,
+            createdByAgentId: options?.recordRevision?.createdByAgentId ?? null,
+            createdByUserId: options?.recordRevision?.createdByUserId ?? null,
+            source: options?.recordRevision?.source ?? "patch",
+            rolledBackFromRevisionId: options?.recordRevision?.rolledBackFromRevisionId ?? null,
+            changedKeys,
+            beforeConfig: beforeConfig as unknown as Record<string, unknown>,
+            afterConfig: afterConfig as unknown as Record<string, unknown>,
+          });
+        }
       }
-    }
+
+      return normalized;
+    });
 
     return normalizedUpdated;
   }

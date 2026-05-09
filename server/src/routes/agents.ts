@@ -22,6 +22,7 @@ import {
   updateAgentInstructionsBundleSchema,
   updateAgentPermissionsSchema,
   updateAgentInstructionsPathSchema,
+  updateAgentProviderSchema,
   wakeAgentSchema,
   updateAgentSchema,
   supportedEnvironmentDriversForAdapter,
@@ -1189,6 +1190,110 @@ export function agentRoutes(
     }
 
     return details;
+  }
+
+  async function buildProviderSwitchPatch(
+    req: Request,
+    existing: {
+      id: string;
+      companyId: string;
+      name: string;
+      adapterType: string;
+      adapterConfig: unknown;
+      defaultEnvironmentId?: string | null;
+    },
+    input: {
+      adapterType: string;
+      adapterConfig: Record<string, unknown>;
+      runtimeConfig?: Record<string, unknown>;
+      defaultEnvironmentId?: string | null;
+      replaceAdapterConfig?: boolean;
+    },
+  ): Promise<Record<string, unknown>> {
+    const requestedAdapterType = assertKnownAdapterType(input.adapterType);
+    const requestedAdapterConfig = asRecord(input.adapterConfig) ?? {};
+    assertNoAgentAdapterConfigMutation(req, requestedAdapterConfig);
+    if (adapterConfigTouchesInstructionsConfig(requestedAdapterConfig)) {
+      await assertCanManageInstructionsPath(req, existing);
+    }
+
+    const existingAdapterConfig = asRecord(existing.adapterConfig) ?? {};
+    const changingAdapterType = requestedAdapterType !== existing.adapterType;
+    const replaceAdapterConfig = input.replaceAdapterConfig !== false;
+    let rawEffectiveAdapterConfig: Record<string, unknown> = requestedAdapterConfig;
+
+    if (!changingAdapterType && !replaceAdapterConfig) {
+      rawEffectiveAdapterConfig = { ...existingAdapterConfig, ...requestedAdapterConfig };
+    }
+
+    if (changingAdapterType) {
+      const ADAPTER_AGNOSTIC_KEYS = [
+        "env", "cwd", "timeoutSec", "graceSec",
+        "promptTemplate", "bootstrapPromptTemplate",
+      ] as const;
+      for (const key of ADAPTER_AGNOSTIC_KEYS) {
+        if (rawEffectiveAdapterConfig[key] === undefined && existingAdapterConfig[key] !== undefined) {
+          rawEffectiveAdapterConfig = { ...rawEffectiveAdapterConfig, [key]: existingAdapterConfig[key] };
+        }
+      }
+      rawEffectiveAdapterConfig = preserveInstructionsBundleConfig(
+        existingAdapterConfig,
+        rawEffectiveAdapterConfig,
+      );
+    }
+
+    if (
+      !changingAdapterType
+      && replaceAdapterConfig
+      && KNOWN_INSTRUCTIONS_BUNDLE_KEYS.some((key) =>
+        existingAdapterConfig[key] !== undefined && rawEffectiveAdapterConfig[key] === undefined,
+      )
+    ) {
+      await assertCanManageInstructionsPath(req, existing);
+    }
+
+    const effectiveAdapterConfig = applyCreateDefaultsByAdapterType(
+      requestedAdapterType,
+      rawEffectiveAdapterConfig,
+    );
+    const normalizedAdapterConfig = await normalizeMediatedAdapterConfigForPersistence({
+      companyId: existing.companyId,
+      adapterType: requestedAdapterType,
+      adapterConfig: effectiveAdapterConfig,
+    });
+
+    const patchData: Record<string, unknown> = {
+      adapterType: requestedAdapterType,
+      adapterConfig: syncInstructionsBundleConfigFromFilePath(existing, normalizedAdapterConfig),
+    };
+
+    if (Object.prototype.hasOwnProperty.call(input, "runtimeConfig") && input.runtimeConfig) {
+      assertNoAgentRuntimeConfigAdapterConfigMutation(req, input.runtimeConfig);
+      patchData.runtimeConfig = await normalizeRuntimeConfigAdapterConfigsForPersistence(
+        existing.companyId,
+        requestedAdapterType,
+        input.runtimeConfig,
+        asRecord(patchData.adapterConfig) ?? {},
+      );
+    }
+
+    if (Object.prototype.hasOwnProperty.call(input, "defaultEnvironmentId")) {
+      patchData.defaultEnvironmentId =
+        typeof input.defaultEnvironmentId === "string" ? input.defaultEnvironmentId : null;
+    }
+
+    await assertAgentDefaultEnvironmentSelection(
+      existing.companyId,
+      Object.prototype.hasOwnProperty.call(patchData, "defaultEnvironmentId")
+        ? (typeof patchData.defaultEnvironmentId === "string" ? patchData.defaultEnvironmentId : null)
+        : existing.defaultEnvironmentId,
+      {
+        allowedDrivers: allowedEnvironmentDriversForAgent(requestedAdapterType),
+        allowedSandboxProviders: allowedSandboxProvidersForAgent(requestedAdapterType),
+      },
+    );
+
+    return patchData;
   }
 
   function buildUnsupportedSkillSnapshot(
@@ -2533,6 +2638,48 @@ export function agentRoutes(
     });
 
     res.json(result.bundle);
+  });
+
+  router.post("/agents/:id/provider", validate(updateAgentProviderSchema), async (req, res) => {
+    const id = req.params.id as string;
+    const existing = await svc.getById(id);
+    if (!existing) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    await assertCanUpdateAgent(req, existing);
+
+    const patchData = await buildProviderSwitchPatch(req, existing, req.body);
+    const actor = getActorInfo(req);
+    const agent = await svc.update(id, patchData, {
+      recordRevision: {
+        createdByAgentId: actor.agentId,
+        createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+        source: "provider_switch",
+      },
+    });
+    if (!agent) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+
+    await logActivity(db, {
+      companyId: agent.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "agent.provider_switched",
+      entityType: "agent",
+      entityId: agent.id,
+      details: {
+        fromAdapterType: existing.adapterType,
+        toAdapterType: agent.adapterType,
+        ...summarizeAgentUpdateDetails(patchData),
+      },
+    });
+
+    res.json(agent);
   });
 
   router.patch("/agents/:id", validate(updateAgentSchema), async (req, res) => {

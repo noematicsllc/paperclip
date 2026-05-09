@@ -102,6 +102,16 @@ export const updateAgentSchema = createAgentSchema
 
 export type UpdateAgent = z.infer<typeof updateAgentSchema>;
 
+export const updateAgentProviderSchema = z.object({
+  adapterType: z.string().trim().min(1),
+  adapterConfig: adapterConfigSchema.optional().default({}),
+  runtimeConfig: agentRuntimeConfigSchema.optional(),
+  defaultEnvironmentId: z.string().uuid().optional().nullable(),
+  replaceAdapterConfig: z.boolean().optional().default(true),
+});
+
+export type UpdateAgentProvider = z.infer<typeof updateAgentProviderSchema>;
+
 export const updateAgentInstructionsPathSchema = z.object({
   path: z.string().trim().min(1).nullable(),
   adapterConfigKey: z.string().trim().min(1).optional(),

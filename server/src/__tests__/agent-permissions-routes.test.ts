@@ -585,6 +585,160 @@ describe.sequential("agent permission routes", () => {
     }));
   });
 
+  it("switches an agent provider with one update call and an audit entry", async () => {
+    const existingAgent = {
+      ...baseAgent,
+      adapterType: "cursor",
+      adapterConfig: {
+        model: "cursor-small",
+        env: {
+          CURSOR_API_KEY: {
+            type: "plain",
+            value: "secret",
+          },
+        },
+        cwd: "/workspace",
+        instructionsFilePath: "/workspace/AGENTS.md",
+      },
+    };
+    const updatedAgent = {
+      ...existingAgent,
+      adapterType: "codex_local",
+      adapterConfig: {
+        env: existingAgent.adapterConfig.env,
+        cwd: "/workspace",
+        instructionsFilePath: "/workspace/AGENTS.md",
+        model: "gpt-5.4-mini",
+        dangerouslyBypassApprovalsAndSandbox: true,
+      },
+    };
+    mockAgentService.getById.mockResolvedValue(existingAgent);
+    mockAgentService.update.mockResolvedValue(updatedAgent);
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agents/${agentId}/provider`)
+      .send({
+        adapterType: "codex_local",
+        adapterConfig: {
+          model: "gpt-5.4-mini",
+        },
+      }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalledTimes(1);
+    expect(mockAgentService.update).toHaveBeenCalledWith(
+      agentId,
+      expect.objectContaining({
+        adapterType: "codex_local",
+        adapterConfig: expect.objectContaining({
+          env: existingAgent.adapterConfig.env,
+          cwd: "/workspace",
+          instructionsFilePath: "/workspace/AGENTS.md",
+          model: "gpt-5.4-mini",
+          dangerouslyBypassApprovalsAndSandbox: expect.any(Boolean),
+        }),
+      }),
+      expect.objectContaining({
+        recordRevision: expect.objectContaining({
+          createdByUserId: "board-user",
+          source: "provider_switch",
+        }),
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "agent.provider_switched",
+      entityType: "agent",
+      entityId: agentId,
+      details: expect.objectContaining({
+        fromAdapterType: "cursor",
+        toAdapterType: "codex_local",
+        changedTopLevelKeys: ["adapterConfig", "adapterType"],
+        changedAdapterConfigKeys: expect.arrayContaining([
+          "cwd",
+          "dangerouslyBypassApprovalsAndSandbox",
+          "env",
+          "instructionsFilePath",
+          "model",
+        ]),
+      }),
+    }));
+  });
+
+  it("clears an incompatible default environment in the same provider switch", async () => {
+    const environmentId = "33333333-3333-4333-8333-333333333333";
+    mockAgentService.getById.mockResolvedValue({
+      ...baseAgent,
+      adapterType: "codex_local",
+      defaultEnvironmentId: environmentId,
+    });
+    mockAgentService.update.mockResolvedValue({
+      ...baseAgent,
+      adapterType: "process",
+      defaultEnvironmentId: null,
+    });
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agents/${agentId}/provider`)
+      .send({
+        adapterType: "process",
+        adapterConfig: {},
+        defaultEnvironmentId: null,
+      }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalledWith(
+      agentId,
+      expect.objectContaining({
+        adapterType: "process",
+        adapterConfig: expect.any(Object),
+        defaultEnvironmentId: null,
+      }),
+      expect.anything(),
+    );
+    expect(mockEnvironmentService.getById).not.toHaveBeenCalled();
+  });
+
+  it("blocks agent-authenticated provider switches that mutate instructions bundle config", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agents/${agentId}/provider`)
+      .send({
+        adapterType: "codex_local",
+        adapterConfig: {
+          instructionsRootPath: "/etc",
+          instructionsEntryFile: "passwd",
+        },
+      }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("instructions path or bundle configuration");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
   it("normalizes cheap-profile env bindings through the adapter config secret pipeline", async () => {
     mockAgentService.getById.mockResolvedValue({
       ...baseAgent,
