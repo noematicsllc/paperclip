@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
 import type { ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Agent } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Agents } from "./Agents";
+import { Agents, buildAgentProviderSwitchPayload } from "./Agents";
 
 const mockAgentsApi = vi.hoisted(() => ({
   list: vi.fn(),
@@ -54,6 +54,16 @@ vi.mock("../api/heartbeats", () => ({
 
 vi.mock("../adapters/adapter-display-registry", () => ({
   getAdapterLabel: (type: string) => type,
+  getAdapterLabels: () => ({}),
+  getAdapterDisplay: (type: string) => ({
+    label: type,
+    description: type,
+    icon: () => null,
+  }),
+}));
+
+vi.mock("../adapters/use-disabled-adapters", () => ({
+  useDisabledAdaptersSync: () => new Set<string>(),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -88,10 +98,8 @@ function makeAgent(overrides: Partial<Agent>): Agent {
 }
 
 async function flushReact() {
-  await act(async () => {
-    await Promise.resolve();
-    await new Promise((resolve) => window.setTimeout(resolve, 0));
-  });
+  await Promise.resolve();
+  await new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
 describe("Agents", () => {
@@ -125,9 +133,8 @@ describe("Agents", () => {
   afterEach(async () => {
     const currentRoot = root;
     if (currentRoot) {
-      await act(async () => {
-        currentRoot.unmount();
-      });
+      flushSync(() => currentRoot.unmount());
+      await flushReact();
     }
     queryClient.clear();
     container.remove();
@@ -137,7 +144,7 @@ describe("Agents", () => {
 
   it("shows the configured model beside the adapter on the all agents page", async () => {
     root = createRoot(container);
-    await act(async () => {
+    flushSync(() => {
       root!.render(
         <QueryClientProvider client={queryClient}>
           <Agents />
@@ -149,5 +156,56 @@ describe("Agents", () => {
 
     expect(container.textContent).toContain("codex_local");
     expect(container.textContent).toContain("gpt-5.4");
+  });
+
+  it("builds a single provider switch payload while preserving same-adapter config", () => {
+    const agent = makeAgent({
+      adapterType: "codex_local",
+      adapterConfig: {
+        env: { OPENAI_API_KEY: { type: "secret", secretId: "secret-1" } },
+        model: "gpt-5.4",
+        timeoutSec: 900,
+        reasoningEffort: "medium",
+      },
+    });
+
+    expect(buildAgentProviderSwitchPayload(agent, {
+      adapterType: "codex_local",
+      model: "gpt-5.5",
+      effort: "high",
+    })).toEqual({
+      adapterType: "codex_local",
+      replaceAdapterConfig: true,
+      adapterConfig: {
+        env: { OPENAI_API_KEY: { type: "secret", secretId: "secret-1" } },
+        model: "gpt-5.5",
+        timeoutSec: 900,
+        modelReasoningEffort: "high",
+      },
+    });
+  });
+
+  it("lets the provider route preserve adapter-agnostic keys on adapter changes", () => {
+    const agent = makeAgent({
+      adapterType: "codex_local",
+      adapterConfig: {
+        env: { OPENAI_API_KEY: { type: "secret", secretId: "secret-1" } },
+        model: "gpt-5.4",
+        timeoutSec: 900,
+      },
+    });
+
+    expect(buildAgentProviderSwitchPayload(agent, {
+      adapterType: "claude_local",
+      model: "claude-default",
+      effort: "medium",
+    })).toEqual({
+      adapterType: "claude_local",
+      replaceAdapterConfig: true,
+      adapterConfig: {
+        model: "claude-default",
+        effort: "medium",
+      },
+    });
   });
 });

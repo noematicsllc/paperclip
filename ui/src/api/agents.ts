@@ -78,6 +78,14 @@ export interface AgentWakeRequest {
   forceFreshSession?: boolean;
 }
 
+export interface AgentProviderUpdate {
+  adapterType: string;
+  adapterConfig?: Record<string, unknown>;
+  runtimeConfig?: Record<string, unknown>;
+  defaultEnvironmentId?: string | null;
+  replaceAdapterConfig?: boolean;
+}
+
 function withCompanyScope(path: string, companyId?: string) {
   if (!companyId) return path;
   const separator = path.includes("?") ? "&" : "?";
@@ -133,6 +141,8 @@ export const agentsApi = {
     api.post<AgentHireResponse>(`/companies/${companyId}/agent-hires`, data),
   update: (id: string, data: Record<string, unknown>, companyId?: string) =>
     api.patch<Agent>(agentPath(id, companyId), data),
+  updateProvider: (id: string, data: AgentProviderUpdate, companyId?: string) =>
+    api.post<Agent>(agentPath(id, companyId, "/provider"), data),
   updatePermissions: (id: string, data: AgentPermissionUpdate, companyId?: string) =>
     api.patch<AgentDetail>(agentPath(id, companyId, "/permissions"), data),
   instructionsBundle: (id: string, companyId?: string) =>
