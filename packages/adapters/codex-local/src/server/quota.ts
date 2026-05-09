@@ -240,9 +240,12 @@ export async function fetchCodexQuota(
   const rateLimit = body.rate_limit;
   if (rateLimit?.primary_window != null) {
     const w = rateLimit.primary_window;
+    const usedPercent = normalizeCodexUsedPercent(w.used_percent);
     windows.push({
       label: "5h limit",
-      usedPercent: normalizeCodexUsedPercent(w.used_percent),
+      kind: "rolling",
+      usedPercent,
+      remainingPercent: usedPercent != null ? Math.max(0, 100 - usedPercent) : null,
       resetsAt:
         typeof w.reset_at === "number"
           ? unixSecondsToIso(w.reset_at)
@@ -253,9 +256,12 @@ export async function fetchCodexQuota(
   }
   if (rateLimit?.secondary_window != null) {
     const w = rateLimit.secondary_window;
+    const usedPercent = normalizeCodexUsedPercent(w.used_percent);
     windows.push({
       label: "Weekly limit",
-      usedPercent: normalizeCodexUsedPercent(w.used_percent),
+      kind: "weekly",
+      usedPercent,
+      remainingPercent: usedPercent != null ? Math.max(0, 100 - usedPercent) : null,
       resetsAt:
         typeof w.reset_at === "number"
           ? unixSecondsToIso(w.reset_at)
@@ -269,7 +275,9 @@ export async function fetchCodexQuota(
     const valueLabel = balance != null ? `$${(balance / 100).toFixed(2)} remaining` : "N/A";
     windows.push({
       label: "Credits",
+      kind: "credits",
       usedPercent: null,
+      remainingPercent: null,
       resetsAt: null,
       valueLabel,
       detail: null,
@@ -326,9 +334,12 @@ function unixSecondsToIso(value: number | null | undefined): string | null {
 
 function buildCodexRpcWindow(label: string, window: CodexRpcWindow | null | undefined): QuotaWindow | null {
   if (!window) return null;
+  const usedPercent = normalizeCodexUsedPercent(window.usedPercent);
   return {
     label,
-    usedPercent: normalizeCodexUsedPercent(window.usedPercent),
+    kind: label.toLowerCase().includes("week") ? "weekly" : "rolling",
+    usedPercent,
+    remainingPercent: usedPercent != null ? Math.max(0, 100 - usedPercent) : null,
     resetsAt: unixSecondsToIso(window.resetsAt),
     valueLabel: null,
     detail: null,
@@ -379,7 +390,9 @@ export function mapCodexRpcQuota(result: CodexRpcRateLimitsResult, account?: Cod
     if (limitId === "codex" && limit.credits && limit.credits.unlimited !== true) {
       windows.push({
         label: "Credits",
+        kind: "credits",
         usedPercent: null,
+        remainingPercent: null,
         resetsAt: null,
         valueLabel: parseCreditBalance(limit.credits.balance) ?? "N/A",
         detail: null,

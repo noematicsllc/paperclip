@@ -11,6 +11,10 @@ import { Agents, buildAgentProviderSwitchPayload } from "./Agents";
 const mockAgentsApi = vi.hoisted(() => ({
   list: vi.fn(),
   org: vi.fn(),
+  capacity: vi.fn(),
+  recordCapacitySnapshot: vi.fn(),
+  adapterModels: vi.fn(),
+  updateProvider: vi.fn(),
 }));
 
 const mockHeartbeatsApi = vi.hoisted(() => ({
@@ -127,6 +131,63 @@ describe("Agents", () => {
         reports: [],
       },
     ]);
+    const capacityPayload = {
+      agentId: "agent-1",
+      adapterType: "codex_local",
+      provider: "openai",
+      model: "gpt-5.4",
+      subscriptionId: "openai:default",
+      cost30dCents: 1234,
+      cost30dLabel: "$12.34",
+      weekly: {
+        label: "Weekly limit",
+        kind: "weekly",
+        source: "operator-manual-entry",
+        sourceLabel: "vendor dashboard",
+        capturedAt: "2026-05-09T22:00:00.000Z",
+        staleDays: 0,
+        stale: false,
+        usedPercent: 60,
+        remainingPercent: 40,
+        limitValue: 100,
+        usedValue: 60,
+        remainingValue: 40,
+        unit: "tokens",
+        resetsAt: null,
+        valueLabel: "40 remaining",
+        detail: "vendor dashboard",
+      },
+      rolling: {
+        label: "5h limit",
+        kind: "rolling",
+        source: "codex-rpc",
+        sourceLabel: "codex-rpc",
+        capturedAt: "2026-05-09T22:00:00.000Z",
+        staleDays: 0,
+        stale: false,
+        usedPercent: 30,
+        remainingPercent: 70,
+        limitValue: null,
+        usedValue: null,
+        remainingValue: null,
+        unit: null,
+        resetsAt: null,
+        valueLabel: null,
+        detail: null,
+      },
+      windows: [],
+      manualEntryAllowed: true,
+      narrative: "openai 30d cost $12.34 · weekly 60% used · rolling 30% used",
+      updatedAt: "2026-05-09T22:00:00.000Z",
+    };
+    mockAgentsApi.capacity.mockResolvedValue(capacityPayload);
+    mockAgentsApi.adapterModels.mockResolvedValue([
+      { id: "gpt-5.4", label: "GPT-5.4" },
+    ]);
+    mockAgentsApi.updateProvider.mockImplementation((_id, payload) => Promise.resolve({
+      ...makeAgent({ adapterConfig: payload.adapterConfig ?? {} }),
+    }));
+    mockAgentsApi.recordCapacitySnapshot.mockResolvedValue(capacityPayload);
     mockHeartbeatsApi.liveRunsForCompany.mockResolvedValue([]);
   });
 
@@ -156,6 +217,34 @@ describe("Agents", () => {
 
     expect(container.textContent).toContain("codex_local");
     expect(container.textContent).toContain("gpt-5.4");
+  });
+
+  it("shows subscription capacity when the runtime dropdown opens", async () => {
+    root = createRoot(container);
+    flushSync(() => {
+      root!.render(
+        <QueryClientProvider client={queryClient}>
+          <Agents />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    const trigger = document.body.querySelector<HTMLButtonElement>('button[aria-label="Runtime for Alpha"]');
+    expect(trigger).not.toBeNull();
+    trigger!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushReact();
+    await flushReact();
+    await flushReact();
+
+    expect(mockAgentsApi.capacity).toHaveBeenCalledWith("agent-1", "company-1");
+    expect(document.body.textContent).toContain("Weekly limit");
+    expect(document.body.textContent).toContain("60% used / 40% rem");
+    expect(document.body.textContent).toContain("4-5h rolling");
+    expect(document.body.textContent).toContain("30% used / 70% rem");
+    expect(document.body.textContent).toContain("$12.34");
+    expect(document.body.textContent).toContain("Update from dashboard");
   });
 
   it("builds a single provider switch payload while preserving same-adapter config", () => {

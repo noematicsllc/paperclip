@@ -507,10 +507,11 @@ describe("fetchClaudeQuota", () => {
     vi.unstubAllGlobals();
   });
 
-  function mockFetch(body: unknown, ok = true, status = 200) {
+  function mockFetch(body: unknown, ok = true, status = 200, headersInit: HeadersInit = {}) {
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok,
       status,
+      headers: new Headers(headersInit),
       json: async () => body,
     } as Response);
   }
@@ -524,6 +525,28 @@ describe("fetchClaudeQuota", () => {
     mockFetch({});
     const windows = await fetchClaudeQuota("token");
     expect(windows).toEqual([]);
+  });
+
+  it("maps Anthropic token rate-limit response headers into a 5-minute rolling window", async () => {
+    mockFetch({}, true, 200, {
+      "anthropic-ratelimit-tokens-limit": "1000",
+      "anthropic-ratelimit-tokens-remaining": "750",
+      "anthropic-ratelimit-tokens-reset": "2026-05-09T22:35:00Z",
+    });
+    const windows = await fetchClaudeQuota("token");
+    expect(windows).toHaveLength(1);
+    expect(windows[0]).toMatchObject({
+      label: "5-min token limit",
+      kind: "rolling",
+      usedPercent: 25,
+      remainingPercent: 75,
+      resetsAt: "2026-05-09T22:35:00Z",
+      limitValue: 1000,
+      remainingValue: 750,
+      unit: "tokens",
+      source: "anthropic-response-headers",
+    });
+    expect(windows[0]!.capturedAt).toEqual(expect.any(String));
   });
 
   it("parses five_hour window with percentage-range utilization", async () => {
@@ -603,15 +626,16 @@ describe("fetchClaudeQuota", () => {
       },
     });
     const windows = await fetchClaudeQuota("token");
-    expect(windows).toEqual([
-      {
-        label: "Extra usage",
-        usedPercent: null,
-        resetsAt: null,
-        valueLabel: "Not enabled",
-        detail: "Extra usage not enabled",
-      },
-    ]);
+    expect(windows).toHaveLength(1);
+    expect(windows[0]).toMatchObject({
+      label: "Extra usage",
+      kind: "credits",
+      usedPercent: null,
+      remainingPercent: null,
+      resetsAt: null,
+      valueLabel: "Not enabled",
+      detail: "Extra usage not enabled",
+    });
   });
 
   it("formats extra usage credits from cents to dollars", async () => {
@@ -762,28 +786,36 @@ describe("mapCodexRpcQuota", () => {
     expect(snapshot.windows).toEqual([
       {
         label: "5h limit",
+        kind: "rolling",
         usedPercent: 1,
+        remainingPercent: 99,
         resetsAt: "2025-11-18T21:06:40.000Z",
         valueLabel: null,
         detail: null,
       },
       {
         label: "Weekly limit",
+        kind: "weekly",
         usedPercent: 27,
+        remainingPercent: 73,
         resetsAt: null,
         valueLabel: null,
         detail: null,
       },
       {
         label: "GPT-5.3-Codex-Spark · 5h limit",
+        kind: "rolling",
         usedPercent: 8,
+        remainingPercent: 92,
         resetsAt: null,
         valueLabel: null,
         detail: null,
       },
       {
         label: "GPT-5.3-Codex-Spark · Weekly limit",
+        kind: "weekly",
         usedPercent: 20,
+        remainingPercent: 80,
         resetsAt: null,
         valueLabel: null,
         detail: null,
@@ -805,7 +837,9 @@ describe("mapCodexRpcQuota", () => {
     expect(snapshot.windows).toEqual([
       {
         label: "Credits",
+        kind: "credits",
         usedPercent: null,
+        remainingPercent: null,
         resetsAt: null,
         valueLabel: "$12.34 remaining",
         detail: null,

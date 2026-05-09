@@ -278,14 +278,28 @@ export interface HireApprovedHookResult {
 export interface QuotaWindow {
   /** human label, e.g. "5h", "7d", "Sonnet 7d", "Credits" */
   label: string;
+  /** normalized window kind for UIs that need stable grouping */
+  kind?: "rolling" | "weekly" | "credits" | "other";
   /** percent of the window already consumed (0-100), null when not reported */
   usedPercent: number | null;
+  /** percent remaining (0-100), null when not reported */
+  remainingPercent?: number | null;
   /** iso timestamp when this window resets, null when not reported */
   resetsAt: string | null;
+  /** numeric limit when the provider exposes one */
+  limitValue?: number | null;
+  /** numeric remaining quantity when the provider exposes one */
+  remainingValue?: number | null;
+  /** unit for numeric values, e.g. tokens, requests, minutes */
+  unit?: string | null;
   /** free-form value label for credit-style windows, e.g. "$4.20 remaining" */
   valueLabel: string | null;
   /** optional supporting text, e.g. reset details or provider-specific notes */
   detail?: string | null;
+  /** provider-specific source for this exact window */
+  source?: string | null;
+  /** capture timestamp for cached/manual windows */
+  capturedAt?: string | null;
 }
 
 /** result for one provider from getQuotaWindows() */

@@ -12,6 +12,7 @@ import type {
   HeartbeatRun,
   Approval,
   AgentConfigRevision,
+  AgentModelCapacity,
 } from "@paperclipai/shared";
 import type {
   AdapterModelProfileDefinition,
@@ -86,6 +87,19 @@ export interface AgentProviderUpdate {
   replaceAdapterConfig?: boolean;
 }
 
+export interface AgentCapacitySnapshotUpdate {
+  sourceLabel: string;
+  capturedAt?: string;
+  weeklyLimit?: number | null;
+  weeklyUsed?: number | null;
+  weeklyRemaining?: number | null;
+  rollingKind?: string | null;
+  rollingLimit?: number | null;
+  rollingUsed?: number | null;
+  rollingRemaining?: number | null;
+  rollingResetAt?: string | null;
+}
+
 function withCompanyScope(path: string, companyId?: string) {
   if (!companyId) return path;
   const separator = path.includes("?") ? "&" : "?";
@@ -143,6 +157,10 @@ export const agentsApi = {
     api.patch<Agent>(agentPath(id, companyId), data),
   updateProvider: (id: string, data: AgentProviderUpdate, companyId?: string) =>
     api.post<Agent>(agentPath(id, companyId, "/provider"), data),
+  capacity: (id: string, companyId?: string) =>
+    api.get<AgentModelCapacity>(agentPath(id, companyId, "/capacity")),
+  recordCapacitySnapshot: (id: string, data: AgentCapacitySnapshotUpdate, companyId?: string) =>
+    api.post<AgentModelCapacity>(agentPath(id, companyId, "/capacity-snapshots"), data),
   updatePermissions: (id: string, data: AgentPermissionUpdate, companyId?: string) =>
     api.patch<AgentDetail>(agentPath(id, companyId, "/permissions"), data),
   instructionsBundle: (id: string, companyId?: string) =>

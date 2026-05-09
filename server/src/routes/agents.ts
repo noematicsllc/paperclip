@@ -14,6 +14,7 @@ import {
   deriveAgentUrlKey,
   isUuidLike,
   normalizeIssueIdentifier,
+  recordSubscriptionCapacitySnapshotSchema,
   resetAgentSessionSchema,
   testAdapterEnvironmentSchema,
   type AgentSkillSnapshot,
@@ -99,6 +100,7 @@ import {
 import { getTelemetryClient } from "../telemetry.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { recoveryService } from "../services/recovery/service.js";
+import { subscriptionCapacityService } from "../services/subscription-capacity.js";
 
 const RUN_LOG_DEFAULT_LIMIT_BYTES = 256_000;
 const RUN_LOG_MAX_LIMIT_BYTES = 1024 * 1024;
@@ -161,6 +163,7 @@ export function agentRoutes(
 
   const router = Router();
   const svc = agentService(db);
+  const capacity = subscriptionCapacityService(db);
   const access = accessService(db);
   const approvalsSvc = approvalService(db);
   const budgets = budgetService(db);
@@ -2639,6 +2642,59 @@ export function agentRoutes(
 
     res.json(result.bundle);
   });
+
+  router.get("/agents/:id/capacity", async (req, res) => {
+    const id = req.params.id as string;
+    const existing = await svc.getById(id);
+    if (!existing) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    await assertCanReadAgent(req, existing);
+    assertBoard(req);
+    res.json(await capacity.getAgentCapacity(existing));
+  });
+
+  router.post(
+    "/agents/:id/capacity-snapshots",
+    validate(recordSubscriptionCapacitySnapshotSchema),
+    async (req, res) => {
+      const id = req.params.id as string;
+      const existing = await svc.getById(id);
+      if (!existing) {
+        res.status(404).json({ error: "Agent not found" });
+        return;
+      }
+      await assertCanReadAgent(req, existing);
+      assertBoard(req);
+
+      const actor = getActorInfo(req);
+      const snapshot = await capacity.recordManualSnapshot(existing, req.body, {
+        agentId: actor.agentId,
+        userId: actor.actorType === "user" ? actor.actorId : null,
+      });
+
+      await logActivity(db, {
+        companyId: existing.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "agent.subscription_capacity_snapshot_recorded",
+        entityType: "agent",
+        entityId: existing.id,
+        details: {
+          provider: snapshot.provider,
+          subscriptionId: snapshot.subscriptionId,
+          model: snapshot.model,
+          source: snapshot.source,
+          sourceLabel: snapshot.sourceLabel,
+        },
+      });
+
+      res.status(201).json(await capacity.getAgentCapacity(existing));
+    },
+  );
 
   router.post("/agents/:id/provider", validate(updateAgentProviderSchema), async (req, res) => {
     const id = req.params.id as string;

@@ -38,6 +38,7 @@ import {
 } from "@paperclipai/adapter-codex-local";
 import {
   execute as cursorExecute,
+  getQuotaWindows as cursorGetQuotaWindows,
   listCursorSkills,
   syncCursorSkills,
   testEnvironment as cursorTestEnvironment,
@@ -257,6 +258,7 @@ const cursorLocalAdapter: ServerAdapterModule = {
   requiresMaterializedRuntimeSkills: true,
   getRuntimeCommandSpec: buildCursorRuntimeCommandSpec,
   agentConfigurationDoc: cursorAgentConfigurationDoc,
+  getQuotaWindows: cursorGetQuotaWindows,
 };
 
 const geminiLocalAdapter: ServerAdapterModule = {

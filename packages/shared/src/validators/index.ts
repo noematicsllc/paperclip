@@ -302,6 +302,11 @@ export {
 } from "./cost.js";
 
 export {
+  recordSubscriptionCapacitySnapshotSchema,
+  type RecordSubscriptionCapacitySnapshot,
+} from "./quota.js";
+
+export {
   createFinanceEventSchema,
   type CreateFinanceEvent,
 } from "./finance.js";

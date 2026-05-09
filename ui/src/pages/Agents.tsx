@@ -1,7 +1,12 @@
 import { useState, useEffect, useMemo, type SyntheticEvent } from "react";
 import { Link, useNavigate, useLocation } from "@/lib/router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { agentsApi, type AgentProviderUpdate, type OrgNode } from "../api/agents";
+import {
+  agentsApi,
+  type AgentCapacitySnapshotUpdate,
+  type AgentProviderUpdate,
+  type OrgNode,
+} from "../api/agents";
 import { heartbeatsApi } from "../api/heartbeats";
 import { useCompany } from "../context/CompanyContext";
 import { useDialogActions } from "../context/DialogContext";
@@ -32,7 +37,7 @@ import {
   Plus,
   SlidersHorizontal,
 } from "lucide-react";
-import { AGENT_ROLE_LABELS, type Agent } from "@paperclipai/shared";
+import { AGENT_ROLE_LABELS, type Agent, type AgentModelCapacity, type CapacityWindowSnapshot } from "@paperclipai/shared";
 
 import { getAdapterLabel } from "../adapters/adapter-display-registry";
 import { listAdapterOptions } from "../adapters/metadata";
@@ -58,6 +63,13 @@ type AgentProviderDraft = {
 type EffortOption = {
   id: string;
   label: string;
+};
+
+type ManualCapacityDraft = {
+  sourceLabel: string;
+  weeklyLimit: string;
+  weeklyUsed: string;
+  weeklyRemaining: string;
 };
 
 const codexEffortOptions: EffortOption[] = [
@@ -190,6 +202,100 @@ function agentProviderDraftChanged(agent: Agent, draft: AgentProviderDraft): boo
     draft.adapterType !== current.adapterType ||
     draft.model !== current.model ||
     draft.effort !== current.effort
+  );
+}
+
+function formatPercentPair(window: CapacityWindowSnapshot | null): string {
+  if (!window) return "not reported";
+  if (window.usedPercent != null && window.remainingPercent != null) {
+    return `${window.usedPercent}% used / ${window.remainingPercent}% rem`;
+  }
+  return window.valueLabel ?? window.detail ?? "reported";
+}
+
+function formatWindowMeta(window: CapacityWindowSnapshot | null): string {
+  if (!window) return "";
+  const parts = [];
+  if (window.sourceLabel) parts.push(window.sourceLabel);
+  if (window.stale && window.staleDays != null) parts.push(`stale ${window.staleDays}d`);
+  else if (window.capturedAt) parts.push(new Date(window.capturedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+  if (window.resetsAt) parts.push(`resets ${new Date(window.resetsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
+  return parts.join(" / ");
+}
+
+function parseManualNumber(value: string): number | null {
+  const trimmed = value.trim().replace(/,/g, "");
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.trunc(parsed);
+}
+
+function buildManualCapacityPayload(draft: ManualCapacityDraft): AgentCapacitySnapshotUpdate {
+  return {
+    sourceLabel: draft.sourceLabel.trim(),
+    weeklyLimit: parseManualNumber(draft.weeklyLimit),
+    weeklyUsed: parseManualNumber(draft.weeklyUsed),
+    weeklyRemaining: parseManualNumber(draft.weeklyRemaining),
+  };
+}
+
+function CapacityMeter({ window }: { window: CapacityWindowSnapshot | null }) {
+  const used = window?.usedPercent;
+  return (
+    <div className="h-1.5 w-16 overflow-hidden rounded-full bg-muted">
+      <div
+        className="h-full bg-foreground/70"
+        style={{ width: `${used == null ? 0 : Math.max(0, Math.min(100, used))}%` }}
+      />
+    </div>
+  );
+}
+
+function CapacityLine({
+  label,
+  window,
+}: {
+  label: string;
+  window: CapacityWindowSnapshot | null;
+}) {
+  return (
+    <div className="grid grid-cols-[74px_64px_1fr] items-center gap-2 text-[11px]">
+      <span className="text-muted-foreground">{label}</span>
+      <CapacityMeter window={window} />
+      <span className={cn("min-w-0 truncate", window?.stale && "text-amber-600 dark:text-amber-400")}>
+        {formatPercentPair(window)}
+        {formatWindowMeta(window) ? ` (${formatWindowMeta(window)})` : ""}
+      </span>
+    </div>
+  );
+}
+
+function AgentCapacitySummary({
+  capacity,
+  loading,
+  error,
+}: {
+  capacity?: AgentModelCapacity;
+  loading: boolean;
+  error: Error | null;
+}) {
+  if (loading) return <p className="text-xs text-muted-foreground">Loading quota...</p>;
+  if (error) return <p className="text-xs text-destructive">{error.message}</p>;
+  if (!capacity) return <p className="text-xs text-muted-foreground">No quota data loaded.</p>;
+  return (
+    <div className="space-y-1.5 rounded-md border border-border p-2">
+      <CapacityLine label="Weekly limit" window={capacity.weekly} />
+      <CapacityLine label="4-5h rolling" window={capacity.rolling} />
+      <div className="grid grid-cols-[74px_64px_1fr] items-center gap-2 text-[11px]">
+        <span className="text-muted-foreground">Cost (30d)</span>
+        <span />
+        <span className="font-mono">{capacity.cost30dLabel}</span>
+      </div>
+      <p className="truncate text-[11px] text-muted-foreground" title={capacity.narrative}>
+        {capacity.narrative}
+      </p>
+    </div>
   );
 }
 
@@ -588,6 +694,13 @@ function AgentProviderControl({
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<AgentProviderDraft>(() => getAgentProviderDraft(agent));
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualDraft, setManualDraft] = useState<ManualCapacityDraft>({
+    sourceLabel: "",
+    weeklyLimit: "",
+    weeklyUsed: "",
+    weeklyRemaining: "",
+  });
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const adapterOptions = useMemo(() => {
     const options = listAdapterOptions()
@@ -609,6 +722,12 @@ function AgentProviderControl({
       environmentId: agent.defaultEnvironmentId ?? null,
     }),
     enabled: open,
+  });
+  const capacityQuery = useQuery({
+    queryKey: queryKeys.agents.capacity(companyId, agent.id),
+    queryFn: () => agentsApi.capacity(agent.id, companyId),
+    enabled: open,
+    staleTime: 60_000,
   });
   const modelOptions = useMemo(() => {
     const rows = modelQuery.data ?? [];
@@ -641,9 +760,33 @@ function AgentProviderControl({
       setErrorMessage(error instanceof Error ? error.message : "Provider update failed");
     },
   });
+  const recordCapacitySnapshot = useMutation({
+    mutationFn: () => agentsApi.recordCapacitySnapshot(
+      agent.id,
+      buildManualCapacityPayload(manualDraft),
+      companyId,
+    ),
+    onMutate: () => setErrorMessage(null),
+    onSuccess: (updatedCapacity) => {
+      queryClient.setQueryData(queryKeys.agents.capacity(companyId, agent.id), updatedCapacity);
+      setManualOpen(false);
+      setManualDraft({
+        sourceLabel: "",
+        weeklyLimit: "",
+        weeklyUsed: "",
+        weeklyRemaining: "",
+      });
+    },
+    onError: (error) => {
+      setErrorMessage(error instanceof Error ? error.message : "Capacity snapshot update failed");
+    },
+  });
 
   useEffect(() => {
-    if (!open) setDraft(getAgentProviderDraft(agent));
+    if (!open) {
+      setDraft(getAgentProviderDraft(agent));
+      setManualOpen(false);
+    }
   }, [agent, open]);
 
   function stopRowNavigation(event: SyntheticEvent) {
@@ -686,7 +829,7 @@ function AgentProviderControl({
         </button>
       </PopoverTrigger>
       <PopoverContent
-        className="w-80 p-3"
+        className="w-96 p-3"
         align="end"
         onClick={(event) => event.stopPropagation()}
       >
@@ -774,6 +917,93 @@ function AgentProviderControl({
                 ))}
               </select>
             </label>
+          )}
+
+          <AgentCapacitySummary
+            capacity={capacityQuery.data}
+            loading={capacityQuery.isLoading}
+            error={capacityQuery.error instanceof Error ? capacityQuery.error : null}
+          />
+
+          {capacityQuery.data?.manualEntryAllowed && (
+            <div className="space-y-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 text-xs"
+                disabled={recordCapacitySnapshot.isPending}
+                onClick={() => setManualOpen((value) => !value)}
+              >
+                Update from dashboard
+              </Button>
+              {manualOpen && (
+                <div className="space-y-2 rounded-md border border-border p-2">
+                  <label className="block space-y-1">
+                    <span className="text-[11px] uppercase text-muted-foreground">Source</span>
+                    <input
+                      className="h-8 w-full rounded-md border border-border bg-background px-2 text-sm outline-none"
+                      placeholder="vendor dashboard"
+                      value={manualDraft.sourceLabel}
+                      disabled={recordCapacitySnapshot.isPending}
+                      onChange={(event) => setManualDraft((prev) => ({ ...prev, sourceLabel: event.target.value }))}
+                    />
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    <label className="block space-y-1">
+                      <span className="text-[11px] uppercase text-muted-foreground">Limit</span>
+                      <input
+                        className="h-8 w-full rounded-md border border-border bg-background px-2 text-sm outline-none"
+                        inputMode="numeric"
+                        value={manualDraft.weeklyLimit}
+                        disabled={recordCapacitySnapshot.isPending}
+                        onChange={(event) => setManualDraft((prev) => ({ ...prev, weeklyLimit: event.target.value }))}
+                      />
+                    </label>
+                    <label className="block space-y-1">
+                      <span className="text-[11px] uppercase text-muted-foreground">Used</span>
+                      <input
+                        className="h-8 w-full rounded-md border border-border bg-background px-2 text-sm outline-none"
+                        inputMode="numeric"
+                        value={manualDraft.weeklyUsed}
+                        disabled={recordCapacitySnapshot.isPending}
+                        onChange={(event) => setManualDraft((prev) => ({ ...prev, weeklyUsed: event.target.value }))}
+                      />
+                    </label>
+                    <label className="block space-y-1">
+                      <span className="text-[11px] uppercase text-muted-foreground">Remaining</span>
+                      <input
+                        className="h-8 w-full rounded-md border border-border bg-background px-2 text-sm outline-none"
+                        inputMode="numeric"
+                        value={manualDraft.weeklyRemaining}
+                        disabled={recordCapacitySnapshot.isPending}
+                        onChange={(event) => setManualDraft((prev) => ({ ...prev, weeklyRemaining: event.target.value }))}
+                      />
+                    </label>
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={recordCapacitySnapshot.isPending}
+                      onClick={() => setManualOpen(false)}
+                    >
+                      Close
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={!manualDraft.sourceLabel.trim() || recordCapacitySnapshot.isPending}
+                      onClick={() => recordCapacitySnapshot.mutate()}
+                    >
+                      {recordCapacitySnapshot.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                      Save
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
 
           {errorMessage && (

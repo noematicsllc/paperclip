@@ -9,6 +9,7 @@ const execFileAsync = promisify(execFile);
 
 const CLAUDE_USAGE_SOURCE_OAUTH = "anthropic-oauth";
 const CLAUDE_USAGE_SOURCE_CLI = "claude-cli";
+const CLAUDE_RATE_LIMIT_HEADER_SOURCE = "anthropic-response-headers";
 
 export function claudeConfigDir(): string {
   const fromEnv = process.env.CLAUDE_CONFIG_DIR;
@@ -191,6 +192,48 @@ function formatExtraUsageLabel(extraUsage: AnthropicExtraUsage): string | null {
   return `${formatCurrencyAmount(usedCredits / 100, extraUsage.currency)} / ${formatCurrencyAmount(monthlyLimit / 100, extraUsage.currency)}`;
 }
 
+function readHeaderNumber(headers: Headers, name: string): number | null {
+  const raw = headers.get(name);
+  if (!raw) return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function buildAnthropicHeaderQuotaWindow(headers: Headers): QuotaWindow | null {
+  const limit = readHeaderNumber(headers, "anthropic-ratelimit-tokens-limit");
+  const remaining = readHeaderNumber(headers, "anthropic-ratelimit-tokens-remaining");
+  const reset = headers.get("anthropic-ratelimit-tokens-reset");
+  if (limit == null && remaining == null && !reset) return null;
+  const used =
+    limit != null && remaining != null
+      ? Math.max(0, limit - remaining)
+      : null;
+  const usedPercent =
+    limit != null && limit > 0 && used != null
+      ? Math.min(100, Math.round((used / limit) * 100))
+      : null;
+  return {
+    label: "5-min token limit",
+    kind: "rolling",
+    usedPercent,
+    remainingPercent: usedPercent != null ? Math.max(0, 100 - usedPercent) : null,
+    resetsAt: reset,
+    limitValue: limit,
+    remainingValue: remaining,
+    unit: "tokens",
+    valueLabel:
+      remaining != null
+        ? `${remaining.toLocaleString("en-US")} tokens remaining`
+        : null,
+    detail:
+      used != null && limit != null
+        ? `${used.toLocaleString("en-US")} used / ${limit.toLocaleString("en-US")} limit`
+        : null,
+    source: CLAUDE_RATE_LIMIT_HEADER_SOURCE,
+    capturedAt: new Date().toISOString(),
+  };
+}
+
 /** Convert a utilization value to a 0-100 integer percent. Returns null for null/undefined input.
  *  Handles both 0-1 fractions (legacy) and 0-100 percentages (current API). */
 export function toPercent(utilization: number | null | undefined): number | null {
@@ -219,11 +262,18 @@ export async function fetchClaudeQuota(token: string): Promise<QuotaWindow[]> {
   if (!resp.ok) throw new Error(`anthropic usage api returned ${resp.status}`);
   const body = (await resp.json()) as AnthropicUsageResponse;
   const windows: QuotaWindow[] = [];
+  const headerWindow = buildAnthropicHeaderQuotaWindow(resp.headers);
+  if (headerWindow) windows.push(headerWindow);
 
   if (body.five_hour != null) {
     windows.push({
       label: "Current session",
+      kind: "rolling",
       usedPercent: toPercent(body.five_hour.utilization),
+      remainingPercent:
+        toPercent(body.five_hour.utilization) != null
+          ? Math.max(0, 100 - toPercent(body.five_hour.utilization)!)
+          : null,
       resetsAt: body.five_hour.resets_at ?? null,
       valueLabel: null,
       detail: null,
@@ -232,7 +282,12 @@ export async function fetchClaudeQuota(token: string): Promise<QuotaWindow[]> {
   if (body.seven_day != null) {
     windows.push({
       label: "Current week (all models)",
+      kind: "weekly",
       usedPercent: toPercent(body.seven_day.utilization),
+      remainingPercent:
+        toPercent(body.seven_day.utilization) != null
+          ? Math.max(0, 100 - toPercent(body.seven_day.utilization)!)
+          : null,
       resetsAt: body.seven_day.resets_at ?? null,
       valueLabel: null,
       detail: null,
@@ -241,7 +296,12 @@ export async function fetchClaudeQuota(token: string): Promise<QuotaWindow[]> {
   if (body.seven_day_sonnet != null) {
     windows.push({
       label: "Current week (Sonnet only)",
+      kind: "weekly",
       usedPercent: toPercent(body.seven_day_sonnet.utilization),
+      remainingPercent:
+        toPercent(body.seven_day_sonnet.utilization) != null
+          ? Math.max(0, 100 - toPercent(body.seven_day_sonnet.utilization)!)
+          : null,
       resetsAt: body.seven_day_sonnet.resets_at ?? null,
       valueLabel: null,
       detail: null,
@@ -250,16 +310,24 @@ export async function fetchClaudeQuota(token: string): Promise<QuotaWindow[]> {
   if (body.seven_day_opus != null) {
     windows.push({
       label: "Current week (Opus only)",
+      kind: "weekly",
       usedPercent: toPercent(body.seven_day_opus.utilization),
+      remainingPercent:
+        toPercent(body.seven_day_opus.utilization) != null
+          ? Math.max(0, 100 - toPercent(body.seven_day_opus.utilization)!)
+          : null,
       resetsAt: body.seven_day_opus.resets_at ?? null,
       valueLabel: null,
       detail: null,
     });
   }
   if (body.extra_usage != null) {
+    const extraUsed = body.extra_usage.is_enabled === false ? null : toPercent(body.extra_usage.utilization);
     windows.push({
       label: "Extra usage",
-      usedPercent: body.extra_usage.is_enabled === false ? null : toPercent(body.extra_usage.utilization),
+      kind: "credits",
+      usedPercent: extraUsed,
+      remainingPercent: extraUsed != null ? Math.max(0, 100 - extraUsed) : null,
       resetsAt: null,
       valueLabel:
         body.extra_usage.is_enabled === false
